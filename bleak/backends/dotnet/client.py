@@ -168,29 +168,16 @@ class BleakClientDotNet(BaseBleakClient):
                     service.obj.Dispose()
                 self.services = BleakGATTServiceCollection()
             elapsed_time = time.time() - initial_time
-        connected = False
-        if self._services_resolved:
-            # If services has been resolved, then we assume that we are connected. This is due to
-            # some issues with getting `is_connected` to give correct response here.
-            connected = True
-        else:
-            for _ in range(5):
-                await asyncio.sleep(0.2, loop=self.loop)
-                connected = await self.is_connected()
-                if connected:
-                    break
 
-        if connected:
-            logger.debug("Connection successful.")
-        else:
+        if not self._services_resolved:
             await self.disconnect()
             raise BleakError(
                 "Connection to {0} was not successful!".format(self.address)
             )
 
-        return connected
+        return True
 
-    async def disconnect(self) -> bool:
+    async def disconnect(self, **kwargs) -> bool:
         """Disconnect from the specified GATT server.
 
         Returns:
@@ -198,6 +185,7 @@ class BleakClientDotNet(BaseBleakClient):
 
         """
         logger.debug("Disconnecting from BLE device...")
+        timeout = kwargs.get("timeout", self._timeout)
         # Remove notifications
         # TODO: Make sure all notifications are removed prior to Dispose.
         # Dispose all components that we have requested and created.
@@ -205,9 +193,16 @@ class BleakClientDotNet(BaseBleakClient):
             service.obj.Dispose()
         self.services = BleakGATTServiceCollection()
         self._requester.Dispose()
+
+        async def wait_for_disconnection():
+            while await self.is_connected():
+                await asyncio.sleep(0.2)
+
+        await asyncio.wait_for(wait_for_disconnection(), timeout)
+
         self._requester = None
 
-        return not await self.is_connected()
+        return True
 
     async def is_connected(self) -> bool:
         """Check connection status between this client and the server.
@@ -252,7 +247,7 @@ class BleakClientDotNet(BaseBleakClient):
             logger.debug("Get Services...")
             services_result = await wrap_IAsyncOperation(
                 IAsyncOperation[GattDeviceServicesResult](
-                    self._requester.GetGattServicesAsync()
+                    self._requester.GetGattServicesAsync(BluetoothCacheMode.Uncached)
                 ),
                 return_type=GattDeviceServicesResult,
                 loop=self.loop,
@@ -553,7 +548,7 @@ class BleakClientDotNet(BaseBleakClient):
                 callback = self._callbacks.pop(characteristic_obj.Uuid.ToString())
                 self._bridge.RemoveValueChangedCallback(characteristic_obj, callback)
 
-            return GattCommunicationStatus.AccessDenied
+            return status
         return status
 
     async def stop_notify(self, _uuid: Union[str, uuid.UUID]) -> None:
