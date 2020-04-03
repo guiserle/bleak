@@ -8,13 +8,14 @@ Created on 2017-12-05 by hbldh <henrik.blidh@nedomkull.com>
 import logging
 import asyncio
 import uuid
+import time
 from asyncio.events import AbstractEventLoop
 from functools import wraps
 from typing import Callable, Any, Union
 
 from bleak.exc import BleakError, BleakDotNetTaskError
 from bleak.backends.client import BaseBleakClient
-from bleak.backends.dotnet.discovery import discover
+from bleak.backends.dotnet.scanner import BleakScannerDotNet
 from bleak.backends.dotnet.utils import (
     wrap_Task,
     wrap_IAsyncOperation,
@@ -95,6 +96,27 @@ class BleakClientDotNet(BaseBleakClient):
 
     # Connectivity methods
 
+    async def find(self, timeout=None) -> bool:
+        scanner = BleakScannerDotNet()
+        found_event = asyncio.Event()
+
+        def received_callback(sender, eventargs):
+            async def set_event():
+                found_event.set()
+            dev_info = scanner.parse_eventargs(eventargs)
+            if dev_info.address == self.address:
+                asyncio.run_coroutine_threadsafe(set_event(), self.loop)
+
+        scanner.register_detection_callback(received_callback)
+        await scanner.start()
+        try:
+            await asyncio.wait_for(found_event.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+        await scanner.stop()
+        return found_event.is_set()
+
+
     async def connect(self, **kwargs) -> bool:
         """Connect to the specified GATT server.
 
@@ -106,22 +128,17 @@ class BleakClientDotNet(BaseBleakClient):
 
         """
         # Try to find the desired device.
+        initial_time = time.time()
         timeout = kwargs.get("timeout", self._timeout)
-        devices = await discover(timeout=timeout, loop=self.loop)
-        sought_device = list(
-            filter(lambda x: x.address.upper() == self.address.upper(), devices)
-        )
 
-        if len(sought_device):
-            self._device_info = sought_device[0].details
-        else:
+        if not await self.find(timeout):
             raise BleakError(
                 "Device with address {0} was " "not found.".format(self.address)
             )
 
         logger.debug("Connecting to BLE device @ {0}".format(self.address))
 
-        args = [UInt64(self._device_info.BluetoothAddress)]
+        args = [UInt64(int(self.address.replace(':', ''), 16))]
         if self._address_type is not None:
             args.append(
                 BluetoothAddressType.Public
@@ -142,7 +159,16 @@ class BleakClientDotNet(BaseBleakClient):
         self._requester.ConnectionStatusChanged += _ConnectionStatusChanged_Handler
 
         # Obtain services, which also leads to connection being established.
-        services = await self.get_services()
+        elapsed_time = 0.0
+        while not self._services_resolved and elapsed_time < timeout:
+            if elapsed_time:
+            try:
+                services = await self.get_services()
+            except BleakDotNetTaskError:
+                for service in self.services:
+                    service.obj.Dispose()
+                self.services = BleakGATTServiceCollection()
+            elapsed_time = time.time() - initial_time
         connected = False
         if self._services_resolved:
             # If services has been resolved, then we assume that we are connected. This is due to
@@ -158,6 +184,7 @@ class BleakClientDotNet(BaseBleakClient):
         if connected:
             logger.debug("Connection successful.")
         else:
+            await self.disconnect()
             raise BleakError(
                 "Connection to {0} was not successful!".format(self.address)
             )

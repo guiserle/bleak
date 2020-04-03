@@ -20,7 +20,7 @@ class BaseBleakClient(abc.ABC):
     """
 
     def __init__(self, address, loop=None, **kwargs):
-        self.address = address
+        self.address = address.upper()
         self.loop = loop if loop else asyncio.get_event_loop()
 
         self.services = BleakGATTServiceCollection()
