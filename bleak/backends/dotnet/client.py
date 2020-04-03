@@ -161,7 +161,6 @@ class BleakClientDotNet(BaseBleakClient):
         # Obtain services, which also leads to connection being established.
         elapsed_time = 0.0
         while not self._services_resolved and elapsed_time < timeout:
-            if elapsed_time:
             try:
                 services = await self.get_services()
             except BleakDotNetTaskError:
